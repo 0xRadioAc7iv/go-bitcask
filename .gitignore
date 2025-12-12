@@ -1,2 +1,6 @@
-*.jsonl
+/bin
+
+/data
+/LOCK
+
 TODO.md
