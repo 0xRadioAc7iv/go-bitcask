@@ -8,9 +8,13 @@ import (
 )
 
 func main() {
-	dirPath, maxDataFileSize := utils.HandleCLIInputs()
+	dirPath, maxDataFileSize, port := utils.HandleCLIInputs()
 
-	bitcask := bitcask.Bitcask{DirectoryPath: *dirPath, MaximumDatafileSize: *maxDataFileSize}
+	bitcask := bitcask.Bitcask{
+		DirectoryPath:       *dirPath,
+		MaximumDatafileSize: *maxDataFileSize,
+		ListenerPort:        *port,
+	}
 
 	defer bitcask.Stop()
 	if err := bitcask.Start(); err != nil {

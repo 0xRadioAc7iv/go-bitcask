@@ -1,7 +1,6 @@
 package lock_test
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/0xRadioAc7iv/go-bitcask/internal/utils"
@@ -14,8 +13,6 @@ func TestLockFile(t *testing.T) {
 
 		bk := bitcask.Bitcask{DirectoryPath: dir, MaximumDatafileSize: utils.DefaultDataFileSizeMB * bitcask.OneMegabyte}
 		bk2 := bitcask.Bitcask{DirectoryPath: dir, MaximumDatafileSize: utils.DefaultDataFileSizeMB * bitcask.OneMegabyte}
-
-		fmt.Println(bk.DirectoryPath)
 
 		err := bk.Start()
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"time"
 )
 
 type DiskRecord struct {
@@ -14,6 +15,22 @@ type DiskRecord struct {
 	ValueSize uint32 // Length of Value in Bytes
 	Key       []byte
 	Value     []byte
+}
+
+func CreateRecord(key, value string) DiskRecord {
+	keyBytes := []byte(key)
+	valueBytes := []byte(value)
+
+	record := DiskRecord{
+		CRC:       CalculateCRC(keyBytes, valueBytes),
+		Timestamp: time.Now().UnixNano(),
+		KeySize:   uint32(len(key)),
+		ValueSize: uint32(len(value)),
+		Key:       keyBytes,
+		Value:     valueBytes,
+	}
+
+	return record
 }
 
 func EncodeRecordToBytes(record *DiskRecord) ([]byte, error) {
