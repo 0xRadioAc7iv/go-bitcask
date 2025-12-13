@@ -155,7 +155,7 @@ func (bk *Bitcask) commandHandler(conn net.Conn) {
 			return
 		}
 
-		command = strings.ToLower(strings.TrimSpace(command))
+		command = strings.TrimSpace(command)
 		bk.handleCommand(command, conn)
 	}
 }
@@ -168,7 +168,7 @@ func (bk *Bitcask) handleCommand(command string, conn net.Conn) {
 		return
 	}
 
-	cmd := parts[0]
+	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
 	case "ping":
@@ -177,7 +177,8 @@ func (bk *Bitcask) handleCommand(command string, conn net.Conn) {
 		bk.handleCommandSET(conn, parts)
 	case "get":
 		bk.handleCommandGET(conn, parts)
-	// case "delete":
+	case "delete":
+		bk.handleCommandDelete(conn, parts)
 	case "exists":
 		bk.handleCommandExists(conn, parts)
 	case "count":
@@ -238,6 +239,32 @@ func (bk *Bitcask) handleCommandSET(conn net.Conn, parts []string) {
 		return
 	}
 	bk.setDataKeyDir(key, offset, diskRecord.KeySize, diskRecord.ValueSize)
+
+	bk.reply(conn, "ok")
+}
+
+func (bk *Bitcask) handleCommandDelete(conn net.Conn, parts []string) {
+	if len(parts) != 2 {
+		bk.reply(conn, "Command Error (DELETE): Key is required")
+		return
+	}
+
+	key := parts[1]
+
+	tombstoneRecord := record.CreateTombstoneRecord(key)
+	fmt.Println(tombstoneRecord)
+	encoded, err := record.EncodeRecordToBytes(&tombstoneRecord)
+	if err != nil {
+		bk.reply(conn, "Error while deleting value")
+		return
+	}
+
+	_, err = bk.writeToActiveFile(encoded)
+	if err != nil {
+		bk.reply(conn, "Error while deleting value")
+		return
+	}
+	bk.deleteDataKeyDir(key)
 
 	bk.reply(conn, "ok")
 }
@@ -328,6 +355,10 @@ func (bk *Bitcask) setDataKeyDir(key string, offset int64, keySize uint32, value
 	}
 
 	bk.keyDir[key] = keyDirEntry
+}
+
+func (bk *Bitcask) deleteDataKeyDir(key string) {
+	delete(bk.keyDir, key)
 }
 
 func (bk *Bitcask) reply(conn net.Conn, msg string) {

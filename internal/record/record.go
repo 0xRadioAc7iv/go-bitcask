@@ -33,6 +33,21 @@ func CreateRecord(key, value string) DiskRecord {
 	return record
 }
 
+func CreateTombstoneRecord(key string) DiskRecord {
+	keyBytes := []byte(key)
+
+	record := DiskRecord{
+		CRC:       0,
+		Timestamp: time.Now().UnixNano(),
+		KeySize:   uint32(len(key)),
+		ValueSize: 0,
+		Key:       keyBytes,
+		Value:     nil,
+	}
+
+	return record
+}
+
 func EncodeRecordToBytes(record *DiskRecord) ([]byte, error) {
 	buf := &bytes.Buffer{} // Initializes an empty (zero-valued) buffer
 
