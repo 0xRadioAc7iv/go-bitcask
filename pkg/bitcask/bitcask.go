@@ -3,6 +3,7 @@ package bitcask
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/0xRadioAc7iv/go-bitcask/internal/lock"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/record"
@@ -17,32 +20,46 @@ import (
 )
 
 type Bitcask struct {
-	lockFile       *os.File
-	activeDataFile *os.File
-	activeOffset   int64
-	serverCancel   context.CancelFunc
-	keyDir         KeyDir
+	lockFile        *os.File
+	activeDataFile  *os.File
+	activeOffset    int64
+	serverCancel    context.CancelFunc
+	syncCancel      context.CancelFunc
+	sizeCheckCancel context.CancelFunc
+	keyDir          KeyDir
+
+	dataMu   sync.Mutex   // for activeDataFile + activeOffset
+	keyDirMu sync.RWMutex // for keyDir
 
 	DirectoryPath       string
 	MaximumDatafileSize int
 	ListenerPort        int
+	SyncInterval        uint
+	SizeCheckInterval   uint
 }
 
+const ZERO_NAME = "000"
+
 func (bk *Bitcask) Start() error {
+	var latestFileName string
+
 	lf, err := lock.LockDirectory(bk.DirectoryPath)
 	if err != nil {
+		fmt.Println("Error Locking Bitcask Datafiles Directory")
 		return err
 	}
 	bk.lockFile = lf
 
 	err = bk.openDataDirectory()
 	if err != nil {
-		fmt.Println("Error Opening Bitcask Datafiles Directory:", err)
+		fmt.Println("Error Opening Bitcask Datafiles Directory")
+		return err
 	}
 
 	files, err := bk.scanDatafiles()
 	if err != nil {
-		fmt.Println("Error Scanning for Datafiles:", err)
+		fmt.Println("Error Scanning for Datafiles")
+		return err
 	}
 
 	bk.keyDir = make(KeyDir)
@@ -51,23 +68,39 @@ func (bk *Bitcask) Start() error {
 	// Later, do this with hint files, and make datafiles reading a fallback
 	// for nonexistent hint files
 
-	f, err := bk.createNewActiveDatafile(files)
+	if len(files) == 0 {
+		latestFileName = ZERO_NAME
+	} else {
+		latestFileName = files[len(files)-1]
+	}
+
+	f, err := bk.createNewActiveDatafile(latestFileName)
 	if err != nil {
+		fmt.Println("Error creating new active datafile")
 		return err
 	}
 
+	// Sets the offset to the end of the active datafile
 	offset, _ := f.Seek(0, io.SeekEnd)
 	bk.activeOffset = offset
 	bk.activeDataFile = f
 
 	ctx, cancel := context.WithCancel(context.Background())
 	bk.serverCancel = cancel
-
 	go func() {
 		if err := server.Start(ctx, bk.ListenerPort, bk.commandHandler); err != nil {
-			fmt.Println("Server stopped abruptly:", err)
+			fmt.Println("Server stopped abruptly")
+			panic(err)
 		}
 	}()
+
+	syncCtx, syncCancel := context.WithCancel(context.Background())
+	bk.syncCancel = syncCancel
+	go bk.syncDiskInterval(syncCtx, bk.SyncInterval)
+
+	sizeCheckCtx, sizeCheckCancel := context.WithCancel(context.Background())
+	bk.sizeCheckCancel = sizeCheckCancel
+	go bk.activeDatafileSizeCheckInterval(sizeCheckCtx, bk.SizeCheckInterval)
 
 	fmt.Println("Bitcask started succesfully...")
 	fmt.Printf("Server listening on http://localhost:%d...\n", bk.ListenerPort)
@@ -118,29 +151,53 @@ func (bk *Bitcask) scanDatafiles() ([]string, error) {
 	return datafiles, nil
 }
 
-func (bk *Bitcask) createNewActiveDatafile(datafiles []string) (*os.File, error) {
+func (bk *Bitcask) createNewActiveDatafile(latestFileName string) (*os.File, error) {
+	var newFileNumber int
 	datafileDirPathSuffix := bk.DirectoryPath + DataDirName + "/"
-	if len(datafiles) == 0 {
-		return os.OpenFile(datafileDirPathSuffix+DataFileSuffix+"0"+DataFileExt, os.O_CREATE|os.O_RDWR, 0644)
+
+	if latestFileName == ZERO_NAME {
+		newFileNumber = 0
+	} else {
+		base := strings.Split(latestFileName, ".")[0]
+		numberStr := strings.Split(base, "_")[1]
+		number, err := strconv.Atoi(numberStr)
+		if err != nil {
+			return nil, err
+		}
+
+		newFileNumber = number + 1
 	}
 
-	lastFile := datafiles[len(datafiles)-1]
+	newFileName := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, DataFileSuffix, newFileNumber, DataFileExt)
+	return os.OpenFile(newFileName, os.O_CREATE|os.O_RDWR, 0644)
+}
 
-	// filename like: "data_002.data"
-	// split: ["data_002", "data"]
-	base := strings.Split(lastFile, ".")[0]
-	// split: ["data", "002"]
-	numberStr := strings.Split(base, "_")[1]
-	// Convert: "2" -> 2
-	number, err := strconv.Atoi(numberStr)
+func (bk *Bitcask) rotateActiveDatafile() error {
+	bk.dataMu.Lock()
+	defer bk.dataMu.Unlock()
+
+	latestFileName := bk.activeDataFile.Name()
+
+	err := bk.activeDataFile.Sync()
 	if err != nil {
-		return nil, err
+		fmt.Println("There was an error while syncing the active datafile on rotation")
+		return err
+	}
+	err = bk.activeDataFile.Close()
+	if err != nil {
+		fmt.Println("There was an error while closing the active datafile on rotation")
+		return err
 	}
 
-	nextNumber := number + 1
-	nextFilename := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, DataFileSuffix, nextNumber, DataFileExt)
+	f, err := bk.createNewActiveDatafile(latestFileName)
+	if err != nil {
+		return err
+	}
 
-	return os.OpenFile(nextFilename, os.O_CREATE|os.O_RDWR, 0644)
+	bk.activeDataFile = f
+	bk.activeOffset = 0
+
+	return nil
 }
 
 func (bk *Bitcask) commandHandler(conn net.Conn) {
@@ -183,6 +240,8 @@ func (bk *Bitcask) handleCommand(command string, conn net.Conn) {
 		bk.handleCommandExists(conn, parts)
 	case "count":
 		bk.handleCommandCount(conn, parts)
+	case "list":
+		bk.handleCommandList(conn, parts)
 	default:
 		bk.handleInvalidCommand(conn)
 	}
@@ -199,7 +258,11 @@ func (bk *Bitcask) handleCommandGET(conn net.Conn, parts []string) {
 	}
 
 	key := parts[1]
+
+	bk.keyDirMu.RLock()
 	keyDirEntry, ok := bk.keyDir[key]
+	bk.keyDirMu.RUnlock()
+
 	if !ok {
 		bk.reply(conn, "nil")
 		return
@@ -233,12 +296,12 @@ func (bk *Bitcask) handleCommandSET(conn net.Conn, parts []string) {
 		return
 	}
 
-	offset, err := bk.writeToActiveFile(encoded)
+	offset, filename, err := bk.writeToActiveFile(encoded)
 	if err != nil {
 		bk.reply(conn, "Error while setting value")
 		return
 	}
-	bk.setDataKeyDir(key, offset, diskRecord.KeySize, diskRecord.ValueSize)
+	bk.setDataKeyDir(filename, key, offset, diskRecord.KeySize, diskRecord.ValueSize)
 
 	bk.reply(conn, "ok")
 }
@@ -252,14 +315,13 @@ func (bk *Bitcask) handleCommandDelete(conn net.Conn, parts []string) {
 	key := parts[1]
 
 	tombstoneRecord := record.CreateTombstoneRecord(key)
-	fmt.Println(tombstoneRecord)
 	encoded, err := record.EncodeRecordToBytes(&tombstoneRecord)
 	if err != nil {
 		bk.reply(conn, "Error while deleting value")
 		return
 	}
 
-	_, err = bk.writeToActiveFile(encoded)
+	_, _, err = bk.writeToActiveFile(encoded)
 	if err != nil {
 		bk.reply(conn, "Error while deleting value")
 		return
@@ -276,7 +338,11 @@ func (bk *Bitcask) handleCommandExists(conn net.Conn, parts []string) {
 	}
 
 	key := parts[1]
+
+	bk.keyDirMu.RLock()
 	_, ok := bk.keyDir[key]
+	bk.keyDirMu.RUnlock()
+
 	if !ok {
 		bk.reply(conn, "false")
 		return
@@ -291,27 +357,49 @@ func (bk *Bitcask) handleCommandCount(conn net.Conn, parts []string) {
 		return
 	}
 
+	bk.keyDirMu.RLock()
 	count := len(bk.keyDir)
+	bk.keyDirMu.RUnlock()
+
 	bk.reply(conn, strconv.Itoa(count))
+}
+
+func (bk *Bitcask) handleCommandList(conn net.Conn, parts []string) {
+	if len(parts) != 1 {
+		bk.reply(conn, "Command Error (LIST): Too many arguments")
+		return
+	}
+
+	bk.keyDirMu.RLock()
+	keys := make([]string, 0, len(bk.keyDir))
+	for k := range bk.keyDir {
+		keys = append(keys, k)
+	}
+	bk.keyDirMu.RUnlock()
+
+	keyList := "----- KEYS START -----\n" + strings.Join(keys, "\n") + "\n----- KEYS END -----"
+
+	bk.reply(conn, keyList)
 }
 
 func (bk *Bitcask) handleInvalidCommand(conn net.Conn) {
 	bk.reply(conn, "Invalid Command")
 }
 
-func (bk *Bitcask) writeToActiveFile(data []byte) (offset int64, err error) {
+func (bk *Bitcask) writeToActiveFile(data []byte) (offset int64, filename string, err error) {
+	bk.dataMu.Lock()
+	defer bk.dataMu.Unlock()
+
+	filename = bk.activeDataFile.Name()
+
 	n, err := bk.activeDataFile.WriteAt(data, bk.activeOffset)
 	if err != nil {
-		return 0, err
-	}
-	err = bk.activeDataFile.Sync()
-	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
 	offset = bk.activeOffset
 	bk.activeOffset += int64(n)
-	return offset, nil
+	return offset, filename, nil
 }
 
 func (bk *Bitcask) readFromFile(filename string, offset, recordSize uint32) (string, error) {
@@ -346,18 +434,24 @@ func (bk *Bitcask) readFromFile(filename string, offset, recordSize uint32) (str
 
 }
 
-func (bk *Bitcask) setDataKeyDir(key string, offset int64, keySize uint32, valueSize uint32) {
+func (bk *Bitcask) setDataKeyDir(filename, key string, offset int64, keySize uint32, valueSize uint32) {
 	keyDirEntry := KeyDirEntry{
-		FileName:   bk.activeDataFile.Name(),
+		FileName:   filename,
 		Offset:     uint32(offset),
 		ValueSize:  valueSize,
 		RecordSize: 20 + keySize + valueSize, // 20 = CRC (4) + Timestamp (8) + KeySizeField (4) + ValueSizeField (4)
 	}
 
+	bk.keyDirMu.Lock()
+	defer bk.keyDirMu.Unlock()
+
 	bk.keyDir[key] = keyDirEntry
 }
 
 func (bk *Bitcask) deleteDataKeyDir(key string) {
+	bk.keyDirMu.Lock()
+	defer bk.keyDirMu.Unlock()
+
 	delete(bk.keyDir, key)
 }
 
@@ -368,17 +462,87 @@ func (bk *Bitcask) reply(conn net.Conn, msg string) {
 	}
 }
 
+func (bk *Bitcask) isActiveDatafileSizeOverTheAllowedMaximum() (bool, error) {
+	bk.dataMu.Lock()
+	fileInfo, err := bk.activeDataFile.Stat()
+	bk.dataMu.Unlock()
+
+	if err != nil {
+		return false, errors.New("Error while fetching Active Datafile Info")
+	}
+
+	fileSize := fileInfo.Size()
+	if fileSize >= int64(bk.MaximumDatafileSize) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func (bk *Bitcask) activeDatafileSizeCheckInterval(ctx context.Context, seconds uint) {
+	ticker := time.NewTicker(time.Duration(seconds) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			ok, err := bk.isActiveDatafileSizeOverTheAllowedMaximum()
+			if err != nil {
+				fmt.Println("Error while checking active data file size:", err)
+				continue
+			}
+
+			if ok {
+				err := bk.rotateActiveDatafile()
+				if err != nil {
+					panic(err)
+				}
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (bk *Bitcask) syncDiskInterval(ctx context.Context, seconds uint) {
+	ticker := time.NewTicker(time.Duration(seconds) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			bk.dataMu.Lock()
+			err := bk.activeDataFile.Sync()
+			bk.dataMu.Unlock()
+
+			if err != nil {
+				fmt.Println("Error syncing active data file:", err)
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (bk *Bitcask) Stop() {
 	if bk.serverCancel != nil {
 		bk.serverCancel()
 	}
 
+	if bk.syncCancel != nil {
+		bk.syncCancel()
+	}
+
+	bk.dataMu.Lock()
 	if bk.activeDataFile != nil {
 		err := bk.activeDataFile.Close()
 		if err != nil {
 			fmt.Println("Error while closing the Active Datafile:", err)
 		}
 	}
+	bk.dataMu.Unlock()
 
 	if bk.lockFile != nil {
 		lock.UnlockDirectory(bk.lockFile)

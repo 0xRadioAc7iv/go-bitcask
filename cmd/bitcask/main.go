@@ -8,12 +8,18 @@ import (
 )
 
 func main() {
-	dirPath, maxDataFileSize, port := utils.HandleCLIInputs()
+	dirPath, maxDataFileSize, port, syncInterval, sizeCheckInterval, err := utils.HandleCLIInputs()
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 
 	bitcask := bitcask.Bitcask{
 		DirectoryPath:       *dirPath,
 		MaximumDatafileSize: *maxDataFileSize,
 		ListenerPort:        *port,
+		SyncInterval:        *syncInterval,
+		SizeCheckInterval:   *sizeCheckInterval,
 	}
 
 	defer bitcask.Stop()
