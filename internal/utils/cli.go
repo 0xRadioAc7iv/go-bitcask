@@ -8,7 +8,8 @@ import (
 	"github.com/0xRadioAc7iv/go-bitcask/pkg/bitcask"
 )
 
-const MinimumDataFileSizeMB = 32
+const MinimumDataFileSizeMB = 64
+const MaximumDataFileSizeMB = 256
 const MinimumSyncInterval = 5
 const MinimumSizeCheckInterval = 5
 
@@ -28,6 +29,11 @@ func HandleCLIInputs() (*string, *int, *int, *uint, *uint, error) {
 
 	if *maxDatafileSizeInMB < MinimumDataFileSizeMB {
 		err := fmt.Sprintf("Max Datafile Size must be >= %dMB", MinimumDataFileSizeMB)
+		return nil, nil, nil, nil, nil, errors.New(err)
+	}
+
+	if *maxDatafileSizeInMB > MaximumDataFileSizeMB {
+		err := fmt.Sprintf("Max Datafile Size must be <= %dMB", MaximumDataFileSizeMB)
 		return nil, nil, nil, nil, nil, errors.New(err)
 	}
 

@@ -2,7 +2,9 @@ package bitcask
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +58,7 @@ func (bk *Bitcask) Start() error {
 		return err
 	}
 
-	files, err := bk.scanDatafiles()
+	files, err := bk.scanForDatafiles()
 	if err != nil {
 		fmt.Println("Error Scanning for Datafiles")
 		return err
@@ -64,9 +66,13 @@ func (bk *Bitcask) Start() error {
 
 	bk.keyDir = make(KeyDir)
 
-	// Read All Scanned Datafiles and load data into KeyDir
 	// Later, do this with hint files, and make datafiles reading a fallback
 	// for nonexistent hint files
+	err = bk.loadDataFromDatafilesToKeyDir(files)
+	if err != nil {
+		fmt.Println("Error Reading Datafiles", err)
+		return err
+	}
 
 	if len(files) == 0 {
 		latestFileName = ZERO_NAME
@@ -131,8 +137,8 @@ func (bk *Bitcask) openDataDirectory() error {
 	return nil
 }
 
-func (bk *Bitcask) scanDatafiles() ([]string, error) {
-	// Looks for '.data' files inside the datafile directory
+// Looks for '.data' files inside the datafile directory
+func (bk *Bitcask) scanForDatafiles() ([]string, error) {
 	files, err := os.ReadDir(bk.DirectoryPath + DataDirName)
 	if err != nil {
 		return nil, err
@@ -151,6 +157,105 @@ func (bk *Bitcask) scanDatafiles() ([]string, error) {
 	return datafiles, nil
 }
 
+func (bk *Bitcask) loadDataFromDatafilesToKeyDir(datafiles []string) error {
+	if len(datafiles) == 0 {
+		return nil
+	}
+
+	filePathPrefix := bk.DirectoryPath + DataDirName + "/"
+
+	for _, filename := range datafiles {
+		fullFilePath := filePathPrefix + filename
+		err := bk.readDatafile(fullFilePath)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return nil
+}
+
+func (bk *Bitcask) readDatafile(filepath string) error {
+	f, err := os.OpenFile(filepath, os.O_RDWR, 0644)
+	if err != nil {
+		fmt.Printf("Error opening the file %v\n: %v", f.Name(), err)
+		return err
+	}
+	defer f.Close()
+
+	var offset int64 = 0
+
+	for {
+		recordStartOffset := offset
+
+		recordHeader := make([]byte, record.DiskRecordHeaderSizeBytes)
+		_, err = io.ReadFull(f, recordHeader)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return truncateAt(f, recordStartOffset)
+			}
+			return err
+		}
+
+		var crc uint32
+		var timestamp int64
+		var keySize uint32
+		var valueSize uint32
+
+		buf := bytes.NewReader(recordHeader)
+		if err := binary.Read(buf, binary.LittleEndian, &crc); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &timestamp); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &keySize); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &valueSize); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+
+		key := make([]byte, keySize)
+		if _, err := io.ReadFull(f, key); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+
+		keyString := string(key)
+
+		if valueSize == 0 {
+			delete(bk.keyDir, keyString)
+			offset += int64(record.DiskRecordHeaderSizeBytes + keySize)
+			continue
+		}
+
+		value := make([]byte, valueSize)
+		if _, err := io.ReadFull(f, value); err != nil {
+			return truncateAt(f, recordStartOffset)
+		}
+
+		if !record.ValidateCRC(key, value, crc) {
+			return truncateAt(f, recordStartOffset)
+		}
+
+		entry, ok := bk.keyDir[keyString]
+
+		// Sets the value, if the key does not exist in the KeyDir OR
+		// the timestamp is greater than the one existing in the KeyDir
+		if !ok || timestamp > entry.Timestamp {
+			bk.keyDir[string(key)] = KeyDirEntry{
+				FileName:   f.Name(),
+				Offset:     uint32(recordStartOffset),
+				ValueSize:  valueSize,
+				RecordSize: record.DiskRecordHeaderSizeBytes + keySize + valueSize,
+				Timestamp:  timestamp,
+			}
+		}
+
+		offset += int64(record.DiskRecordHeaderSizeBytes + keySize + valueSize)
+	}
+}
+
 func (bk *Bitcask) createNewActiveDatafile(latestFileName string) (*os.File, error) {
 	var newFileNumber int
 	datafileDirPathSuffix := bk.DirectoryPath + DataDirName + "/"
@@ -163,6 +268,23 @@ func (bk *Bitcask) createNewActiveDatafile(latestFileName string) (*os.File, err
 		number, err := strconv.Atoi(numberStr)
 		if err != nil {
 			return nil, err
+		}
+
+		f, err := os.OpenFile(datafileDirPathSuffix+latestFileName, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			return nil, err
+		}
+
+		// Checks the size of the previous latest file, if it's size is less than
+		// the allowed maximum, then returns it, saving disk space and prevents
+		// from creating too many datafiles
+		overTheAllowedMaxSize, err := bk.isDatafileSizeOverTheAllowedMaximum(f)
+		if err != nil {
+			return nil, err
+		}
+
+		if !overTheAllowedMaxSize {
+			return f, nil
 		}
 
 		newFileNumber = number + 1
@@ -268,7 +390,7 @@ func (bk *Bitcask) handleCommandGET(conn net.Conn, parts []string) {
 		return
 	}
 
-	value, err := bk.readFromFile(keyDirEntry.FileName, keyDirEntry.Offset, keyDirEntry.RecordSize)
+	value, err := bk.readValueFromFile(keyDirEntry.FileName, keyDirEntry.Offset, keyDirEntry.RecordSize)
 	if err != nil {
 		bk.reply(conn, "Error while reading value")
 	}
@@ -293,12 +415,14 @@ func (bk *Bitcask) handleCommandSET(conn net.Conn, parts []string) {
 	encoded, err := record.EncodeRecordToBytes(&diskRecord)
 	if err != nil {
 		bk.reply(conn, "Error while setting value")
+		fmt.Println(err)
 		return
 	}
 
 	offset, filename, err := bk.writeToActiveFile(encoded)
 	if err != nil {
 		bk.reply(conn, "Error while setting value")
+		fmt.Println(err)
 		return
 	}
 	bk.setDataKeyDir(filename, key, offset, diskRecord.KeySize, diskRecord.ValueSize)
@@ -370,6 +494,8 @@ func (bk *Bitcask) handleCommandList(conn net.Conn, parts []string) {
 		return
 	}
 
+	var keyList string
+
 	bk.keyDirMu.RLock()
 	keys := make([]string, 0, len(bk.keyDir))
 	for k := range bk.keyDir {
@@ -377,7 +503,11 @@ func (bk *Bitcask) handleCommandList(conn net.Conn, parts []string) {
 	}
 	bk.keyDirMu.RUnlock()
 
-	keyList := "----- KEYS START -----\n" + strings.Join(keys, "\n") + "\n----- KEYS END -----"
+	if len(keys) > 0 {
+		keyList = "----- KEYS START -----\n" + strings.Join(keys, "\n") + "\n----- KEYS END -----"
+	} else {
+		keyList = "nil"
+	}
 
 	bk.reply(conn, keyList)
 }
@@ -402,7 +532,7 @@ func (bk *Bitcask) writeToActiveFile(data []byte) (offset int64, filename string
 	return offset, filename, nil
 }
 
-func (bk *Bitcask) readFromFile(filename string, offset, recordSize uint32) (string, error) {
+func (bk *Bitcask) readValueFromFile(filename string, offset, recordSize uint32) (string, error) {
 	f, err := os.OpenFile(filename, os.O_RDONLY, 0644)
 	if err != nil {
 		return "", err
@@ -439,7 +569,8 @@ func (bk *Bitcask) setDataKeyDir(filename, key string, offset int64, keySize uin
 		FileName:   filename,
 		Offset:     uint32(offset),
 		ValueSize:  valueSize,
-		RecordSize: 20 + keySize + valueSize, // 20 = CRC (4) + Timestamp (8) + KeySizeField (4) + ValueSizeField (4)
+		RecordSize: record.DiskRecordHeaderSizeBytes + keySize + valueSize,
+		Timestamp:  time.Now().UnixNano(),
 	}
 
 	bk.keyDirMu.Lock()
@@ -462,10 +593,8 @@ func (bk *Bitcask) reply(conn net.Conn, msg string) {
 	}
 }
 
-func (bk *Bitcask) isActiveDatafileSizeOverTheAllowedMaximum() (bool, error) {
-	bk.dataMu.Lock()
-	fileInfo, err := bk.activeDataFile.Stat()
-	bk.dataMu.Unlock()
+func (bk *Bitcask) isDatafileSizeOverTheAllowedMaximum(datafile *os.File) (bool, error) {
+	fileInfo, err := datafile.Stat()
 
 	if err != nil {
 		return false, errors.New("Error while fetching Active Datafile Info")
@@ -486,7 +615,9 @@ func (bk *Bitcask) activeDatafileSizeCheckInterval(ctx context.Context, seconds 
 	for {
 		select {
 		case <-ticker.C:
-			ok, err := bk.isActiveDatafileSizeOverTheAllowedMaximum()
+			bk.dataMu.Lock()
+			ok, err := bk.isDatafileSizeOverTheAllowedMaximum(bk.activeDataFile)
+			bk.dataMu.Unlock()
 			if err != nil {
 				fmt.Println("Error while checking active data file size:", err)
 				continue
@@ -547,4 +678,11 @@ func (bk *Bitcask) Stop() {
 	if bk.lockFile != nil {
 		lock.UnlockDirectory(bk.lockFile)
 	}
+}
+
+func truncateAt(f *os.File, offset int64) error {
+	if err := f.Truncate(offset); err != nil {
+		return err
+	}
+	return f.Sync()
 }

@@ -17,6 +17,8 @@ type DiskRecord struct {
 	Value     []byte
 }
 
+const DiskRecordHeaderSizeBytes = 20 // CRC (4) + Timestamp (8) + KeySize (4) + ValueSize (4)
+
 func CreateRecord(key, value string) DiskRecord {
 	keyBytes := []byte(key)
 	valueBytes := []byte(value)
