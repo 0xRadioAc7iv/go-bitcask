@@ -1,4 +1,4 @@
-package bitcask
+package core
 
 const (
 	OneMegabyte    = 1024 * 1024 // 1024 (1KB) * 1024 => 1MB

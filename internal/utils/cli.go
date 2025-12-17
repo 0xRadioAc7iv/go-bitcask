@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/0xRadioAc7iv/go-bitcask/pkg/bitcask"
+	"github.com/0xRadioAc7iv/go-bitcask/core"
 )
 
 const MinimumDataFileSizeMB = 64
@@ -47,6 +47,6 @@ func HandleCLIInputs() (*string, *int, *int, *uint, *uint, error) {
 		return nil, nil, nil, nil, nil, errors.New(err)
 	}
 
-	MAX_DATAFILE_SIZE := *maxDatafileSizeInMB * bitcask.OneMegabyte
+	MAX_DATAFILE_SIZE := *maxDatafileSizeInMB * core.OneMegabyte
 	return directoryPath, &MAX_DATAFILE_SIZE, port, syncIntervalInSeconds, sizeCheckIntervalInSeconds, nil
 }

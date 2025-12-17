@@ -1,4 +1,4 @@
-package bitcask
+package core
 
 type KeyDirEntry struct {
 	FileName   string

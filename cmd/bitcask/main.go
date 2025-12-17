@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/0xRadioAc7iv/go-bitcask/core"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/utils"
-	"github.com/0xRadioAc7iv/go-bitcask/pkg/bitcask"
 )
 
 func main() {
@@ -14,7 +14,7 @@ func main() {
 		return
 	}
 
-	bitcask := bitcask.Bitcask{
+	bitcask := core.Bitcask{
 		DirectoryPath:       *dirPath,
 		MaximumDatafileSize: *maxDataFileSize,
 		ListenerPort:        *port,
