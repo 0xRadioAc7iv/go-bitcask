@@ -1,19 +1,28 @@
-APP_NAME=bitcask
+ENGINE=bitcask
+CLI_NAME=bitcask-cli
 BUILD_DIR=bin
 
-.PHONY: fmt build test run clean
+.PHONY: fmt build-cli build-engine build test run-cli run-engine clean
 
 fmt:
 	go fmt ./...
 
-build:
-	go build -o $(BUILD_DIR)/$(APP_NAME) ./cmd/bitcask
+build-cli:
+	go build -o $(BUILD_DIR)/$(CLI_NAME) ./cmd/bitcask-cli
+
+build-engine:
+	go build -o $(BUILD_DIR)/$(ENGINE) ./cmd/bitcask
+
+build: build-cli build-engine
 
 test:
 	go test ./...
 
-run: build
-	$(BUILD_DIR)/$(APP_NAME)
+run-cli: build-cli
+	$(BUILD_DIR)/$(CLI_NAME)
+
+run-engine: build-engine
+	$(BUILD_DIR)/$(ENGINE)
 
 clean:
 	go clean

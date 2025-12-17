@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/0xRadioAc7iv/go-bitcask/internal/lock"
+	"github.com/0xRadioAc7iv/go-bitcask/internal/protocol"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/record"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/server"
 )
@@ -325,45 +325,35 @@ func (bk *Bitcask) rotateActiveDatafile() error {
 func (bk *Bitcask) commandHandler(conn net.Conn) {
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
-
 	for {
-		command, err := reader.ReadString('\n')
+		command, err := protocol.DecodeCommand(conn)
 		if err != nil {
 			fmt.Println("client disconnected")
 			return
 		}
 
-		command = strings.TrimSpace(command)
 		bk.handleCommand(command, conn)
 	}
 }
 
-func (bk *Bitcask) handleCommand(command string, conn net.Conn) {
-	parts := strings.Fields(command)
-
-	if len(parts) == 0 {
-		bk.reply(conn, "")
-		return
-	}
-
-	cmd := strings.ToLower(parts[0])
+func (bk *Bitcask) handleCommand(command *protocol.Command, conn net.Conn) {
+	cmd := strings.ToLower(command.Cmd)
 
 	switch cmd {
 	case "ping":
 		bk.handleCommandPing(conn)
 	case "set":
-		bk.handleCommandSET(conn, parts)
+		bk.handleCommandSET(conn, command.Key, command.Val)
 	case "get":
-		bk.handleCommandGET(conn, parts)
+		bk.handleCommandGET(conn, command.Key)
 	case "delete":
-		bk.handleCommandDelete(conn, parts)
+		bk.handleCommandDelete(conn, command.Key)
 	case "exists":
-		bk.handleCommandExists(conn, parts)
+		bk.handleCommandExists(conn, command.Key)
 	case "count":
-		bk.handleCommandCount(conn, parts)
+		bk.handleCommandCount(conn)
 	case "list":
-		bk.handleCommandList(conn, parts)
+		bk.handleCommandList(conn)
 	default:
 		bk.handleInvalidCommand(conn)
 	}
@@ -373,14 +363,7 @@ func (bk *Bitcask) handleCommandPing(conn net.Conn) {
 	bk.reply(conn, "PONG!")
 }
 
-func (bk *Bitcask) handleCommandGET(conn net.Conn, parts []string) {
-	if len(parts) != 2 {
-		bk.reply(conn, "Command Error (GET): Key is required")
-		return
-	}
-
-	key := parts[1]
-
+func (bk *Bitcask) handleCommandGET(conn net.Conn, key string) {
 	bk.keyDirMu.RLock()
 	keyDirEntry, ok := bk.keyDir[key]
 	bk.keyDirMu.RUnlock()
@@ -398,19 +381,7 @@ func (bk *Bitcask) handleCommandGET(conn net.Conn, parts []string) {
 	bk.reply(conn, value)
 }
 
-func (bk *Bitcask) handleCommandSET(conn net.Conn, parts []string) {
-	if len(parts) > 3 {
-		bk.reply(conn, "Command Error (SET): Too many arguments")
-		return
-	}
-	if len(parts) < 3 {
-		bk.reply(conn, "Command Error (SET): Key and Value is required")
-		return
-	}
-
-	key := parts[1]
-	value := parts[2]
-
+func (bk *Bitcask) handleCommandSET(conn net.Conn, key, value string) {
 	diskRecord := record.CreateRecord(key, value)
 	encoded, err := record.EncodeRecordToBytes(&diskRecord)
 	if err != nil {
@@ -430,14 +401,7 @@ func (bk *Bitcask) handleCommandSET(conn net.Conn, parts []string) {
 	bk.reply(conn, "ok")
 }
 
-func (bk *Bitcask) handleCommandDelete(conn net.Conn, parts []string) {
-	if len(parts) != 2 {
-		bk.reply(conn, "Command Error (DELETE): Key is required")
-		return
-	}
-
-	key := parts[1]
-
+func (bk *Bitcask) handleCommandDelete(conn net.Conn, key string) {
 	tombstoneRecord := record.CreateTombstoneRecord(key)
 	encoded, err := record.EncodeRecordToBytes(&tombstoneRecord)
 	if err != nil {
@@ -455,14 +419,7 @@ func (bk *Bitcask) handleCommandDelete(conn net.Conn, parts []string) {
 	bk.reply(conn, "ok")
 }
 
-func (bk *Bitcask) handleCommandExists(conn net.Conn, parts []string) {
-	if len(parts) != 2 {
-		bk.reply(conn, "Command Error (EXISTS): Key is required")
-		return
-	}
-
-	key := parts[1]
-
+func (bk *Bitcask) handleCommandExists(conn net.Conn, key string) {
 	bk.keyDirMu.RLock()
 	_, ok := bk.keyDir[key]
 	bk.keyDirMu.RUnlock()
@@ -475,12 +432,7 @@ func (bk *Bitcask) handleCommandExists(conn net.Conn, parts []string) {
 	bk.reply(conn, "true")
 }
 
-func (bk *Bitcask) handleCommandCount(conn net.Conn, parts []string) {
-	if len(parts) != 1 {
-		bk.reply(conn, "Command Error (COUNT): Too many arguments")
-		return
-	}
-
+func (bk *Bitcask) handleCommandCount(conn net.Conn) {
 	bk.keyDirMu.RLock()
 	count := len(bk.keyDir)
 	bk.keyDirMu.RUnlock()
@@ -488,12 +440,7 @@ func (bk *Bitcask) handleCommandCount(conn net.Conn, parts []string) {
 	bk.reply(conn, strconv.Itoa(count))
 }
 
-func (bk *Bitcask) handleCommandList(conn net.Conn, parts []string) {
-	if len(parts) != 1 {
-		bk.reply(conn, "Command Error (LIST): Too many arguments")
-		return
-	}
-
+func (bk *Bitcask) handleCommandList(conn net.Conn) {
 	var keyList string
 
 	bk.keyDirMu.RLock()
@@ -587,7 +534,13 @@ func (bk *Bitcask) deleteDataKeyDir(key string) {
 }
 
 func (bk *Bitcask) reply(conn net.Conn, msg string) {
-	_, err := conn.Write([]byte(msg + "\n"))
+	encodedResponse, err := protocol.EncodeResponse(msg)
+	if err != nil {
+		fmt.Println("Error encoding response:", err)
+		return
+	}
+
+	_, err = conn.Write(encodedResponse)
 	if err != nil {
 		fmt.Println("client disconnected")
 	}

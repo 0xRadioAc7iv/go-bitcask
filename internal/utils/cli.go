@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/0xRadioAc7iv/go-bitcask/core"
+	"github.com/kballard/go-shellquote"
 )
 
 const MinimumDataFileSizeMB = 64
@@ -49,4 +50,22 @@ func HandleCLIInputs() (*string, *int, *int, *uint, *uint, error) {
 
 	MAX_DATAFILE_SIZE := *maxDatafileSizeInMB * core.OneMegabyte
 	return directoryPath, &MAX_DATAFILE_SIZE, port, syncIntervalInSeconds, sizeCheckIntervalInSeconds, nil
+}
+
+func SplitStringIntoCommandAndArguments(line string) (string, string, string, error) {
+	parts, err := shellquote.Split(line)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	switch len(parts) {
+	case 1:
+		return parts[0], "", "", nil
+	case 2:
+		return parts[0], parts[1], "", nil
+	case 3:
+		return parts[0], parts[1], parts[2], nil
+	default:
+		return "", "", "", nil
+	}
 }
