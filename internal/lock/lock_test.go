@@ -5,7 +5,6 @@ import (
 
 	"github.com/0xRadioAc7iv/go-bitcask/core"
 	"github.com/0xRadioAc7iv/go-bitcask/internal"
-	"github.com/0xRadioAc7iv/go-bitcask/internal/utils"
 )
 
 func TestLockFile(t *testing.T) {
@@ -14,17 +13,17 @@ func TestLockFile(t *testing.T) {
 
 		bk := core.Bitcask{
 			DirectoryPath:       dir,
-			MaximumDatafileSize: utils.DefaultDataFileSizeMB * core.OneMegabyte,
+			MaximumDatafileSize: core.DefaultDataFileSizeMB * core.OneMegabyte,
 			ListenerPort:        internal.DEFAULT_PORT,
-			SyncInterval:        utils.DefaultSyncInterval,
-			SizeCheckInterval:   utils.DefaultSizeCheckInterval,
+			SyncInterval:        core.DefaultSyncInterval,
+			SizeCheckInterval:   core.DefaultSizeCheckInterval,
 		}
 		bk2 := core.Bitcask{
 			DirectoryPath:       dir,
-			MaximumDatafileSize: utils.DefaultDataFileSizeMB * core.OneMegabyte,
+			MaximumDatafileSize: core.DefaultDataFileSizeMB * core.OneMegabyte,
 			ListenerPort:        internal.DEFAULT_PORT,
-			SyncInterval:        utils.DefaultSyncInterval,
-			SizeCheckInterval:   utils.DefaultSizeCheckInterval,
+			SyncInterval:        core.DefaultSyncInterval,
+			SizeCheckInterval:   core.DefaultSizeCheckInterval,
 		}
 
 		err := bk.Start()
@@ -45,10 +44,10 @@ func TestLockFile(t *testing.T) {
 
 		bk := core.Bitcask{
 			DirectoryPath:       dir,
-			MaximumDatafileSize: utils.DefaultDataFileSizeMB * core.OneMegabyte,
+			MaximumDatafileSize: core.DefaultDataFileSizeMB * core.OneMegabyte,
 			ListenerPort:        internal.DEFAULT_PORT,
-			SyncInterval:        utils.DefaultSyncInterval,
-			SizeCheckInterval:   utils.DefaultSizeCheckInterval,
+			SyncInterval:        core.DefaultSyncInterval,
+			SizeCheckInterval:   core.DefaultSizeCheckInterval,
 		}
 		err := bk.Start()
 		if err != nil {

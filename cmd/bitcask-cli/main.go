@@ -10,7 +10,7 @@ import (
 
 	"github.com/0xRadioAc7iv/go-bitcask/bitcask"
 	"github.com/0xRadioAc7iv/go-bitcask/internal"
-	"github.com/0xRadioAc7iv/go-bitcask/internal/utils"
+	"github.com/kballard/go-shellquote"
 )
 
 func main() {
@@ -48,7 +48,7 @@ func main() {
 			return
 		}
 
-		cmd, key, value, err := utils.SplitStringIntoCommandAndArguments(line)
+		cmd, key, value, err := SplitStringIntoCommandAndArguments(line)
 		if err != nil {
 			fmt.Println("parse error:", err)
 			continue
@@ -60,5 +60,23 @@ func main() {
 		}
 
 		fmt.Println(resp)
+	}
+}
+
+func SplitStringIntoCommandAndArguments(line string) (string, string, string, error) {
+	parts, err := shellquote.Split(line)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	switch len(parts) {
+	case 1:
+		return parts[0], "", "", nil
+	case 2:
+		return parts[0], parts[1], "", nil
+	case 3:
+		return parts[0], parts[1], parts[2], nil
+	default:
+		return "", "", "", nil
 	}
 }

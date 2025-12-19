@@ -19,6 +19,7 @@ import (
 	"github.com/0xRadioAc7iv/go-bitcask/internal/protocol"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/record"
 	"github.com/0xRadioAc7iv/go-bitcask/internal/server"
+	"github.com/0xRadioAc7iv/go-bitcask/internal/utils"
 )
 
 type Bitcask struct {
@@ -40,8 +41,6 @@ type Bitcask struct {
 	SizeCheckInterval   uint
 }
 
-const ZERO_NAME = "000"
-
 func (bk *Bitcask) Start() error {
 	var latestFileName string
 
@@ -58,7 +57,7 @@ func (bk *Bitcask) Start() error {
 		return err
 	}
 
-	files, err := bk.scanForDatafiles()
+	filenames, err := bk.scanForDatafileNames()
 	if err != nil {
 		fmt.Println("Error Scanning for Datafiles")
 		return err
@@ -66,18 +65,16 @@ func (bk *Bitcask) Start() error {
 
 	bk.keyDir = make(KeyDir)
 
-	// Later, do this with hint files, and make datafiles reading a fallback
-	// for nonexistent hint files
-	err = bk.loadDataFromDatafilesToKeyDir(files)
+	err = bk.loadDataInKeyDir(filenames)
 	if err != nil {
-		fmt.Println("Error Reading Datafiles", err)
+		fmt.Println("Error loading data from files:", err)
 		return err
 	}
 
-	if len(files) == 0 {
+	if len(filenames) == 0 {
 		latestFileName = ZERO_NAME
 	} else {
-		latestFileName = files[len(files)-1]
+		latestFileName = filenames[len(filenames)-1] + DataFileExt
 	}
 
 	f, err := bk.createNewActiveDatafile(latestFileName)
@@ -117,28 +114,22 @@ func (bk *Bitcask) Start() error {
 func (bk *Bitcask) openDataDirectory() error {
 	fullDatafileDirectoryPath := bk.DirectoryPath + DataDirName
 
-	_, err := os.Stat(fullDatafileDirectoryPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("Datafile Directory does not exist! Creating one...")
-
-			// 0 (special bit - ignored), 7 (rwx - owner), 5 (r-x - user group), 5 (r-x - others)
-			err := os.Mkdir(fullDatafileDirectoryPath, 0755)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
+	if utils.PathExists(fullDatafileDirectoryPath) {
 		fmt.Println("Datafile Directory already exists. Skipping creation...")
+		return nil
 	}
 
+	fmt.Println("Datafile Directory does not exist! Creating one...")
+	// 0 (special bit - ignored), 7 (rwx - owner), 5 (r-x - user group), 5 (r-x - others)
+	err := os.Mkdir(fullDatafileDirectoryPath, 0755)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
-// Looks for '.data' files inside the datafile directory
-func (bk *Bitcask) scanForDatafiles() ([]string, error) {
+// Looks for '.data' files inside the datafile directory but returns their names
+func (bk *Bitcask) scanForDatafileNames() ([]string, error) {
 	files, err := os.ReadDir(bk.DirectoryPath + DataDirName)
 	if err != nil {
 		return nil, err
@@ -149,7 +140,8 @@ func (bk *Bitcask) scanForDatafiles() ([]string, error) {
 	for _, entry := range files {
 		if !entry.IsDir() {
 			if filepath.Ext(entry.Name()) == DataFileExt {
-				datafiles = append(datafiles, entry.Name())
+				// Splits and returns the name like => (bk_25.data) -> bk_25
+				datafiles = append(datafiles, strings.Split(entry.Name(), ".")[0])
 			}
 		}
 	}
@@ -157,22 +149,103 @@ func (bk *Bitcask) scanForDatafiles() ([]string, error) {
 	return datafiles, nil
 }
 
-func (bk *Bitcask) loadDataFromDatafilesToKeyDir(datafiles []string) error {
-	if len(datafiles) == 0 {
+func (bk *Bitcask) loadDataInKeyDir(datafileNames []string) error {
+	if len(datafileNames) == 0 {
 		return nil
 	}
 
 	filePathPrefix := bk.DirectoryPath + DataDirName + "/"
 
-	for _, filename := range datafiles {
-		fullFilePath := filePathPrefix + filename
-		err := bk.readDatafile(fullFilePath)
+	for _, filename := range datafileNames {
+		hintFilePath := filePathPrefix + filename + HintFileExt
+		if utils.PathExists(hintFilePath) {
+			fmt.Printf("Reading Hint file: %s\n", hintFilePath)
+			err := bk.readHintfile(hintFilePath)
+			if err == nil {
+				continue
+			}
+
+			fmt.Printf("Error reading hint file %s : %v\n", hintFilePath, err)
+		}
+
+		dataFilePath := filePathPrefix + filename + DataFileExt
+		fmt.Printf("Reading Datafile: %s\n", dataFilePath)
+		err := bk.readDatafile(dataFilePath)
 		if err != nil {
 			panic(err)
 		}
 	}
 
 	return nil
+}
+
+func (bk *Bitcask) readHintfile(filepath string) error {
+	f, err := os.OpenFile(filepath, os.O_RDONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for {
+		hintRecordHeader := make([]byte, record.HintRecordHeaderSizeBytes)
+		_, err = io.ReadFull(f, hintRecordHeader)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			return err
+		}
+
+		buf := bytes.NewReader(hintRecordHeader)
+
+		var keySize uint32
+		var fileNameSize uint32
+		var offset uint32
+		var valueSize uint32
+		var timestamp int64
+
+		err := binary.Read(buf, binary.LittleEndian, &keySize)
+		if err != nil {
+			return err
+		}
+		err = binary.Read(buf, binary.LittleEndian, &fileNameSize)
+		if err != nil {
+			return err
+		}
+		err = binary.Read(buf, binary.LittleEndian, &offset)
+		if err != nil {
+			return err
+		}
+		err = binary.Read(buf, binary.LittleEndian, &valueSize)
+		if err != nil {
+			return err
+		}
+		err = binary.Read(buf, binary.LittleEndian, &timestamp)
+		if err != nil {
+			return err
+		}
+
+		payload := make([]byte, keySize+fileNameSize)
+		if _, err := io.ReadFull(f, payload); err != nil {
+			return err
+		}
+
+		fullRecord := append(hintRecordHeader, payload...)
+		hintRecord, err := record.DecodeHintRecordFromBytes(fullRecord)
+		if err != nil {
+			return err
+		}
+
+		key := string(hintRecord.Key)
+
+		bk.keyDir[key] = KeyDirEntry{
+			FileName:   string(hintRecord.FileName),
+			Offset:     hintRecord.Offset,
+			ValueSize:  hintRecord.ValueSize,
+			RecordSize: record.DiskRecordHeaderSizeBytes + hintRecord.KeySize + hintRecord.ValueSize,
+			Timestamp:  hintRecord.Timestamp,
+		}
+	}
 }
 
 func (bk *Bitcask) readDatafile(filepath string) error {
@@ -192,7 +265,7 @@ func (bk *Bitcask) readDatafile(filepath string) error {
 		_, err = io.ReadFull(f, recordHeader)
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return truncateAt(f, recordStartOffset)
+				return utils.TruncateAt(f, recordStartOffset)
 			}
 			return err
 		}
@@ -204,21 +277,21 @@ func (bk *Bitcask) readDatafile(filepath string) error {
 
 		buf := bytes.NewReader(recordHeader)
 		if err := binary.Read(buf, binary.LittleEndian, &crc); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 		if err := binary.Read(buf, binary.LittleEndian, &timestamp); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 		if err := binary.Read(buf, binary.LittleEndian, &keySize); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 		if err := binary.Read(buf, binary.LittleEndian, &valueSize); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 
 		key := make([]byte, keySize)
 		if _, err := io.ReadFull(f, key); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 
 		keyString := string(key)
@@ -231,11 +304,11 @@ func (bk *Bitcask) readDatafile(filepath string) error {
 
 		value := make([]byte, valueSize)
 		if _, err := io.ReadFull(f, value); err != nil {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 
 		if !record.ValidateCRC(key, value, crc) {
-			return truncateAt(f, recordStartOffset)
+			return utils.TruncateAt(f, recordStartOffset)
 		}
 
 		entry, ok := bk.keyDir[keyString]
@@ -290,7 +363,7 @@ func (bk *Bitcask) createNewActiveDatafile(latestFileName string) (*os.File, err
 		newFileNumber = number + 1
 	}
 
-	newFileName := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, DataFileSuffix, newFileNumber, DataFileExt)
+	newFileName := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, FileSuffix, newFileNumber, DataFileExt)
 	return os.OpenFile(newFileName, os.O_CREATE|os.O_RDWR, 0644)
 }
 
@@ -606,6 +679,76 @@ func (bk *Bitcask) isDatafileSizeOverTheAllowedMaximum(datafile *os.File) (bool,
 	return false, nil
 }
 
+func (bk *Bitcask) generateHintFiles() error {
+	// Maps Filenames to Keys
+	fileNameToKeyMap := make(map[string][]string)
+
+	for key, entry := range bk.keyDir {
+		filename := entry.FileName
+		prev, ok := fileNameToKeyMap[filename]
+		if !ok {
+			fileNameToKeyMap[filename] = []string{key}
+		} else {
+			fileNameToKeyMap[filename] = append(prev, key)
+		}
+	}
+
+	for filepath, keys := range fileNameToKeyMap {
+		err := bk.writeToHintFile(filepath, keys)
+		if err != nil {
+			fmt.Printf("Error writing to hint file %s : %v\n", filepath, err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (bk *Bitcask) writeToHintFile(filepath string, keys []string) error {
+	datafileDirPathSuffix := bk.DirectoryPath + DataDirName + "/"
+
+	parts := strings.Split(filepath, "/")
+	hintFileFullName := parts[len(parts)-1]
+	hintFileName := strings.Split(hintFileFullName, ".")[0]
+
+	f, err := os.OpenFile(datafileDirPathSuffix+hintFileName+HintFileExt, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		fmt.Printf("Error opening hint file %s : %v", filepath, err)
+	}
+	defer f.Close()
+
+	for _, key := range keys {
+		keyDirEntry := bk.keyDir[key]
+		hintRecord := record.HintRecord{
+			KeySize:      uint32(len(key)),
+			FileNameSize: uint32(len(keyDirEntry.FileName)),
+			Offset:       keyDirEntry.Offset,
+			ValueSize:    keyDirEntry.ValueSize,
+			Timestamp:    keyDirEntry.Timestamp,
+			Key:          []byte(key),
+			FileName:     []byte(keyDirEntry.FileName),
+		}
+
+		data, err := record.EncodeHintRecordToBytes(&hintRecord)
+		if err != nil {
+			return err
+		}
+
+		_, err = f.Write(data)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = f.Sync()
+	if err != nil {
+		fmt.Printf("Error Syncing Hint file: %s\n", filepath)
+		return err
+	}
+
+	return nil
+}
+
 func (bk *Bitcask) activeDatafileSizeCheckInterval(ctx context.Context, seconds uint) {
 	ticker := time.NewTicker(time.Duration(seconds) * time.Second)
 	defer ticker.Stop()
@@ -664,6 +807,10 @@ func (bk *Bitcask) Stop() {
 		bk.syncCancel()
 	}
 
+	if bk.sizeCheckCancel != nil {
+		bk.sizeCheckCancel()
+	}
+
 	bk.dataMu.Lock()
 	if bk.activeDataFile != nil {
 		err := bk.activeDataFile.Close()
@@ -673,14 +820,12 @@ func (bk *Bitcask) Stop() {
 	}
 	bk.dataMu.Unlock()
 
+	err := bk.generateHintFiles()
+	if err != nil {
+		fmt.Println("Error while generating hint files:", err)
+	}
+
 	if bk.lockFile != nil {
 		lock.UnlockDirectory(bk.lockFile)
 	}
-}
-
-func truncateAt(f *os.File, offset int64) error {
-	if err := f.Truncate(offset); err != nil {
-		return err
-	}
-	return f.Sync()
 }
