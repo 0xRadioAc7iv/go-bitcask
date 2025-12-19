@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/0xRadioAc7iv/go-bitcask/core"
+	"github.com/0xRadioAc7iv/go-bitcask/internal"
 	"github.com/kballard/go-shellquote"
 )
 
@@ -16,14 +17,13 @@ const MinimumSizeCheckInterval = 5
 
 const DefaultDirectoryPath = "./"
 const DefaultDataFileSizeMB = 64
-const DefaultPort = 6969
 const DefaultSyncInterval = 15
 const DefaultSizeCheckInterval = 30
 
 func HandleCLIInputs() (*string, *int, *int, *uint, *uint, error) {
 	directoryPath := flag.String("dir", DefaultDirectoryPath, "Directory Path to be used for this instance")
 	maxDatafileSizeInMB := flag.Int("dfsize", DefaultDataFileSizeMB, "Max Datafile Size (in MB)")
-	port := flag.Int("port", DefaultPort, "Port to use for the TCP Server")
+	port := flag.Int("port", internal.DEFAULT_PORT, "Port to use for the TCP Server")
 	syncIntervalInSeconds := flag.Uint("sync", DefaultSyncInterval, "Interval at each Data is Synced to the Disk")
 	sizeCheckIntervalInSeconds := flag.Uint("sizecheck", DefaultSizeCheckInterval, "Interval at each Datafile Size is checked for rotation")
 	flag.Parse()

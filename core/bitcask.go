@@ -354,6 +354,8 @@ func (bk *Bitcask) handleCommand(command *protocol.Command, conn net.Conn) {
 		bk.handleCommandCount(conn)
 	case "list":
 		bk.handleCommandList(conn)
+	case "help":
+		bk.handleCommandHelp(conn)
 	default:
 		bk.handleInvalidCommand(conn)
 	}
@@ -457,6 +459,49 @@ func (bk *Bitcask) handleCommandList(conn net.Conn) {
 	}
 
 	bk.reply(conn, keyList)
+}
+
+func (bk *Bitcask) handleCommandHelp(conn net.Conn) {
+	helpString := `
+Available Commands:
+
+PING
+  Check if the server is alive.
+  Response: PONG!
+
+SET <key> <value>
+  Store a value for the given key.
+  Overwrites the value if the key already exists.
+  Response: ok
+
+GET <key>
+  Retrieve the value associated with the key.
+  Response: value | nil
+
+DELETE <key>
+  Delete the key and its value.
+  Response: ok
+
+EXISTS <key>
+  Check if a key exists.
+  Response: true | false
+
+COUNT
+  Return the total number of keys stored.
+  Response: integer
+
+LIST
+  List all stored keys.
+  Response: list of keys | nil
+
+HELP (cli only)
+  Show this help message.
+
+EXIT (cli only)
+  Close the client connection.
+`
+
+	bk.reply(conn, strings.TrimSpace(helpString))
 }
 
 func (bk *Bitcask) handleInvalidCommand(conn net.Conn) {
