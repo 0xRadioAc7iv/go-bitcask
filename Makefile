@@ -1,8 +1,8 @@
 ENGINE=bitcask
-CLI_NAME=bitcask-cli
+CLI_NAME=bk-cli
 BUILD_DIR=bin
 
-.PHONY: fmt build-cli build-engine build test run-cli run-engine clean
+.PHONY: fmt build-cli build-engine build test run-cli run-engine clean gen datagen
 
 fmt:
 	go fmt ./...
@@ -27,3 +27,6 @@ run-engine: build-engine
 clean:
 	go clean
 	rm -rf $(BUILD_DIR)
+
+datagen:
+	go run ./scripts/data-gen.go

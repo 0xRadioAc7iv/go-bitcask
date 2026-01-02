@@ -6,7 +6,7 @@ type Config struct {
 }
 
 const DEFAULT_HOST = "127.0.0.1"
-const DEFAULT_PORT = 6969
+const DEFAULT_PORT = 9999
 
 func DefaultConfig() *Config {
 	return &Config{
