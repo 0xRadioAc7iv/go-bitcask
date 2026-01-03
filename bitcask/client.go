@@ -90,7 +90,10 @@ func (c *Client) LIST() (string, error) {
 }
 
 func (c *Client) Close() {
-	c.conn.Close()
+	err := c.conn.Close()
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 }
 
 func (c *Client) Execute(cmd, key, value string) (string, error) {

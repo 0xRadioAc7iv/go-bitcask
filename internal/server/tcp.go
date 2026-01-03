@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-// Starts the TCP Server
+// Starts the TCP Server and Listens for Incoming Connections
 func Start(ctx context.Context, port int, handler func(conn net.Conn)) error {
 	var ln net.Listener
 	var err error
@@ -19,6 +19,8 @@ func Start(ctx context.Context, port int, handler func(conn net.Conn)) error {
 		ln, err = net.Listen("tcp", addr)
 		if err != nil {
 			if errors.Is(err, syscall.EADDRINUSE) {
+				fmt.Printf("[SERVER] Port %d already in use...", port)
+				fmt.Printf("[SERVER] Trying Port: %d", port+1)
 				port++
 				continue
 			}

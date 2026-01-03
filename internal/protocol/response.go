@@ -7,6 +7,16 @@ import (
 	"net"
 )
 
+// EncodeResponse serializes a server response into its wire format.
+//
+// The response is encoded as:
+//
+//	<length:uint32><response bytes>
+//
+// where length is the number of bytes in the response payload.
+//
+// The returned byte slice is suitable for writing directly to a TCP
+// connection.
 func EncodeResponse(resp string) ([]byte, error) {
 	respB := []byte(resp)
 
@@ -21,6 +31,13 @@ func EncodeResponse(resp string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// DecodeResponse reads and decodes a response from a TCP connection.
+//
+// It first reads a 4-byte big-endian length prefix, followed by exactly
+// that many bytes from the connection. The payload is returned as a string.
+//
+// DecodeResponse blocks until the full response has been read or an
+// error occurs.
 func DecodeResponse(conn net.Conn) (string, error) {
 	var respLen uint32
 

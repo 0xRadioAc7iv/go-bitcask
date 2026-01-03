@@ -75,7 +75,7 @@ func HandleCLIInputs() (
 	}
 
 	if *garbageRatio < core.MinGarbageRatio || *garbageRatio > core.MaxGarbageRatio {
-		err := fmt.Sprintf("Size Check Interval must be between %f and %f", core.MinGarbageRatio, core.MaxGarbageRatio)
+		err := fmt.Sprintf("Garbage Ratio must be between %f and %f", core.MinGarbageRatio, core.MaxGarbageRatio)
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, errors.New(err)
 	}
 

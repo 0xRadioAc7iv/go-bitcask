@@ -7,6 +7,9 @@ import (
 	"syscall"
 )
 
+// ListenForProcessInterruptOrKill blocks until it receives an interrupt (Ctrl+C)
+// or termination signal (SIGTERM), then returns. This is typically used to keep
+// a program running until the user requests shutdown.
 func ListenForProcessInterruptOrKill() {
 	// Listen for Ctrl+C or kill
 	sigChan := make(chan os.Signal, 1)

@@ -77,6 +77,6 @@ func SplitStringIntoCommandAndArguments(line string) (string, string, string, er
 	case 3:
 		return parts[0], parts[1], parts[2], nil
 	default:
-		return "", "", "", nil
+		return "", "", "", fmt.Errorf("Well, This shouldn't have happened")
 	}
 }

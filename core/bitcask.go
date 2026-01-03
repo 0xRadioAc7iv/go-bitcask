@@ -55,6 +55,18 @@ type candidate struct {
 	size         int64
 }
 
+// Start initializes the Bitcask instance and begins serving requests.
+//
+// It performs the following steps:
+//   - Acquires an exclusive lock on the data directory
+//   - Creates the data directory if it does not exist
+//   - Rebuilds the KeyDir from hint files and/or datafiles
+//   - Opens or creates the active datafile
+//   - Starts the TCP server
+//   - Launches background goroutines for syncing, rotation, and compaction
+//
+// Start returns an error if initialization fails. On success, the instance
+// runs until Stop is called.
 func (bk *Bitcask) Start() error {
 	var latestFileName string
 
@@ -69,6 +81,11 @@ func (bk *Bitcask) Start() error {
 	err = bk.openDataDirectory()
 	if err != nil {
 		fmt.Println("Error Opening Bitcask Datafiles Directory")
+		return err
+	}
+
+	err = bk.cleanupExistingMergeFiles()
+	if err != nil {
 		return err
 	}
 
@@ -99,7 +116,10 @@ func (bk *Bitcask) Start() error {
 	}
 
 	// Sets the offset to the end of the active datafile
-	offset, _ := f.Seek(0, io.SeekEnd)
+	offset, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
 	bk.activeOffset = offset
 	bk.activeDataFile = f
 
@@ -146,6 +166,28 @@ func (bk *Bitcask) openDataDirectory() error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (bk *Bitcask) cleanupExistingMergeFiles() error {
+	files, err := os.ReadDir(bk.getDatafileDirectoryPathSuffix())
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range files {
+		if !entry.IsDir() {
+			isMergedFile := strings.HasPrefix(entry.Name(), MergedFilePrefix)
+			if isMergedFile {
+				err := os.Remove(bk.getDatafileDirectoryPathSuffix() + entry.Name())
+				if err != nil {
+					fmt.Printf("Error deleting file %s\n", entry.Name())
+					return err
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -273,7 +315,7 @@ func (bk *Bitcask) readHintfile(filepath string) error {
 func (bk *Bitcask) readDatafile(filepath string) error {
 	f, err := os.OpenFile(filepath, os.O_RDWR, 0644)
 	if err != nil {
-		fmt.Printf("Error opening the file %v\n: %v", f.Name(), err)
+		fmt.Printf("Error opening the file %s\n: %v", filepath, err)
 		return err
 	}
 	defer f.Close()
@@ -380,7 +422,7 @@ func (bk *Bitcask) createNewActiveDatafile(latestFileName string) (*os.File, err
 	}
 
 	newFileNumber = number + 1
-	newFileName := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, DataFileSuffix, newFileNumber, DataFileExt)
+	newFileName := fmt.Sprintf("%s%s%d%s", datafileDirPathSuffix, DataFilePrefix, newFileNumber, DataFileExt)
 	return os.OpenFile(newFileName, os.O_CREATE|os.O_RDWR, 0644)
 }
 
@@ -389,7 +431,7 @@ func (bk *Bitcask) rotateActiveDatafile() error {
 	defer bk.dataMu.Unlock()
 
 	latestFileNameWithPath := bk.activeDataFile.Name()
-	latestFileName := bk.getFileNameFromFullPath(latestFileNameWithPath)
+	latestFileName := filepath.Base(latestFileNameWithPath)
 
 	err := bk.activeDataFile.Sync()
 	if err != nil {
@@ -424,6 +466,12 @@ func (bk *Bitcask) commandHandler(conn net.Conn) {
 	for {
 		command, err := protocol.DecodeCommand(conn)
 		if err != nil {
+			return
+		}
+
+		if len(command.Key) > MaxKeyOrValueSize || len(command.Val) > MaxKeyOrValueSize {
+			err := fmt.Sprintf("Error: Maximum Size of Key or Value must not exceed %d bytes\n", MaxKeyOrValueSize)
+			bk.reply(conn, err)
 			return
 		}
 
@@ -701,7 +749,7 @@ func (bk *Bitcask) isFileSizeOverTheAllowedMaximum(file *os.File) (bool, error) 
 func (bk *Bitcask) generateHintFileForDatafile(datafilePath string) error {
 	keys := []string{}
 
-	datafileName := bk.getFileNameFromFullPath(datafilePath)
+	datafileName := filepath.Base(datafilePath)
 
 	bk.keyDirMu.RLock()
 	for key, entry := range bk.keyDir {
@@ -722,19 +770,21 @@ func (bk *Bitcask) generateHintFileForDatafile(datafilePath string) error {
 	return nil
 }
 
-func (bk *Bitcask) writeToHintFile(filepath string, keys []string) error {
-	hintFileFullName := bk.getFileNameFromFullPath(filepath)
+func (bk *Bitcask) writeToHintFile(fileFullPath string, keys []string) error {
+	hintFileFullName := filepath.Base(fileFullPath)
 	hintFileName := strings.Split(hintFileFullName, ".")[0]
 
 	f, err := os.OpenFile(bk.getDatafileDirectoryPathSuffix()+hintFileName+HintFileExt, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		fmt.Printf("Error opening hint file %s : %v", filepath, err)
+		fmt.Printf("Error opening hint file %s : %v", fileFullPath, err)
 		return err
 	}
 	defer f.Close()
 
 	for _, key := range keys {
+		bk.keyDirMu.RLock()
 		keyDirEntry := bk.keyDir[key]
+		bk.keyDirMu.RUnlock()
 		hintRecord := record.HintRecord{
 			KeySize:      uint32(len(key)),
 			FileNameSize: uint32(len(keyDirEntry.FileName)),
@@ -758,7 +808,7 @@ func (bk *Bitcask) writeToHintFile(filepath string, keys []string) error {
 
 	err = f.Sync()
 	if err != nil {
-		fmt.Printf("Error Syncing Hint file: %s\n", filepath)
+		fmt.Printf("Error Syncing Hint file: %s\n", fileFullPath)
 		return err
 	}
 
@@ -776,7 +826,7 @@ func (bk *Bitcask) handleActiveDatafileSizeCheckInterval(ctx context.Context, se
 			ok, err := bk.isFileSizeOverTheAllowedMaximum(bk.activeDataFile)
 			bk.dataMu.Unlock()
 			if err != nil {
-				fmt.Println("[SIZE CHECK] Error while checking active data file size:", err)
+				fmt.Println("[SIZE CHECK] Error while checking active data file size\n", err)
 				continue
 			}
 
@@ -895,6 +945,16 @@ func (bk *Bitcask) handleDatafilesMergeAndCompactionInterval(ctx context.Context
 	}
 }
 
+// Merge & compaction invariants:
+//
+//   - Active datafile is never merged
+//   - Immutable datafiles are read-only
+//   - A KeyDir snapshot is taken at merge start
+//   - Only records matching the snapshot are rewritten
+//   - New datafiles are fsynced and atomically renamed
+//   - Old datafiles and hint files are deleted only after commit
+//
+// These invariants guarantee crash safety and correctness.
 func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnapshot map[string]KeyDirEntry) error {
 	currentMergeFileNumber := 0
 	mergeFiles := []string{}
@@ -1052,7 +1112,7 @@ func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnaps
 	newDataFiles := []string{}
 
 	for _, mergeFilePath := range mergeFiles {
-		newMergeFilePath := bk.getDatafileDirectoryPathSuffix() + DataFileSuffix + strconv.Itoa(latestFileNumber) + DataFileExt
+		newMergeFilePath := bk.getDatafileDirectoryPathSuffix() + DataFilePrefix + strconv.Itoa(latestFileNumber) + DataFileExt
 
 		err := os.Rename(mergeFilePath, newMergeFilePath)
 		if err != nil {
@@ -1081,7 +1141,7 @@ func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnaps
 	for key, entry := range bk.keyDir {
 		fName := entry.FileName
 		for _, fullImmutableFileName := range immutableFiles {
-			fileName := bk.getFileNameFromFullPath(fullImmutableFileName)
+			fileName := filepath.Base(fullImmutableFileName)
 
 			if fName == fileName {
 				delete(bk.keyDir, key)
@@ -1107,7 +1167,7 @@ func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnaps
 
 func (bk *Bitcask) createNewMergedFile(number int) (*os.File, int, error) {
 	numStr := strconv.Itoa(int(number))
-	mergedFileName := MergedFileSuffix + numStr + DataFileExt
+	mergedFileName := MergedFilePrefix + numStr + DataFileExt
 
 	f, err := os.OpenFile(bk.getDatafileDirectoryPathSuffix()+mergedFileName, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -1264,12 +1324,8 @@ func (bk *Bitcask) deleteOlderDataAndHintfiles(immutableFiles []string) error {
 	return nil
 }
 
-func (bk *Bitcask) getFileNameFromFullPath(fileFullPath string) string {
-	return filepath.Base(fileFullPath)
-}
-
 func (bk *Bitcask) getDatafileDirectoryPathSuffix() string {
-	return bk.DirectoryPath + DataDirName + "/"
+	return filepath.Join(bk.DirectoryPath, DataDirName) + string(filepath.Separator)
 }
 
 func (bk *Bitcask) getNextDatafileNumber() (int, error) {
@@ -1309,6 +1365,10 @@ func (bk *Bitcask) getNextDatafileNumber() (int, error) {
 	return max + 1, nil
 }
 
+// Stop gracefully shuts down the Bitcask instance.
+//
+// It cancels all background goroutines, closes the active datafile,
+// and releases the directory lock.
 func (bk *Bitcask) Stop() {
 	if bk.serverCancel != nil {
 		bk.serverCancel()
