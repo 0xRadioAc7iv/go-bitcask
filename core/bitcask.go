@@ -389,8 +389,7 @@ func (bk *Bitcask) rotateActiveDatafile() error {
 	defer bk.dataMu.Unlock()
 
 	latestFileNameWithPath := bk.activeDataFile.Name()
-	pathParts := strings.Split(latestFileNameWithPath, "/")
-	latestFileName := pathParts[len(pathParts)-1]
+	latestFileName := bk.getFileNameFromFullPath(latestFileNameWithPath)
 
 	err := bk.activeDataFile.Sync()
 	if err != nil {
@@ -702,8 +701,7 @@ func (bk *Bitcask) isFileSizeOverTheAllowedMaximum(file *os.File) (bool, error) 
 func (bk *Bitcask) generateHintFileForDatafile(datafilePath string) error {
 	keys := []string{}
 
-	parts := strings.Split(datafilePath, "/")
-	datafileName := parts[len(parts)-1]
+	datafileName := bk.getFileNameFromFullPath(datafilePath)
 
 	bk.keyDirMu.RLock()
 	for key, entry := range bk.keyDir {
@@ -725,8 +723,7 @@ func (bk *Bitcask) generateHintFileForDatafile(datafilePath string) error {
 }
 
 func (bk *Bitcask) writeToHintFile(filepath string, keys []string) error {
-	parts := strings.Split(filepath, "/")
-	hintFileFullName := parts[len(parts)-1]
+	hintFileFullName := bk.getFileNameFromFullPath(filepath)
 	hintFileName := strings.Split(hintFileFullName, ".")[0]
 
 	f, err := os.OpenFile(bk.getDatafileDirectoryPathSuffix()+hintFileName+HintFileExt, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -1084,8 +1081,7 @@ func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnaps
 	for key, entry := range bk.keyDir {
 		fName := entry.FileName
 		for _, fullImmutableFileName := range immutableFiles {
-			filePathParts := strings.Split(fullImmutableFileName, "/")
-			fileName := filePathParts[len(filePathParts)-1]
+			fileName := bk.getFileNameFromFullPath(fullImmutableFileName)
 
 			if fName == fileName {
 				delete(bk.keyDir, key)
@@ -1093,7 +1089,12 @@ func (bk *Bitcask) mergeAndCompactDatafiles(immutableFiles []string, keyDirSnaps
 		}
 	}
 
-	maps.Copy(bk.keyDir, tempKeyDir)
+	for key, entry := range tempKeyDir {
+		v, ok := bk.keyDir[key]
+		if !ok || entry.Timestamp > v.Timestamp {
+			bk.keyDir[key] = entry
+		}
+	}
 	bk.keyDirMu.Unlock()
 
 	err = bk.deleteOlderDataAndHintfiles(immutableFiles)
@@ -1261,6 +1262,10 @@ func (bk *Bitcask) deleteOlderDataAndHintfiles(immutableFiles []string) error {
 	}
 
 	return nil
+}
+
+func (bk *Bitcask) getFileNameFromFullPath(fileFullPath string) string {
+	return filepath.Base(fileFullPath)
 }
 
 func (bk *Bitcask) getDatafileDirectoryPathSuffix() string {
